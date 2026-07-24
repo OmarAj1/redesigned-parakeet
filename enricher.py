@@ -5,18 +5,19 @@ import aiohttp
 import os
 import sys
 import time
+import random
 
 # ==========================================
 # 1. GEMINI CLOUD CONFIGURATION
 # ==========================================
 DB_FILE = "MasterUnifiedDB.db"
 
-# Pull the API key from the GitHub Actions environment securely
-GEMINI_API_KEY = os.environ.get("GROQ_API_KEY") # Keep this as GROQ_API_KEY if that is what you named your GitHub Secret
+GEMINI_API_KEY = os.environ.get("GROQ_API_KEY") 
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
 
-BATCH_SIZE = 100
-REQUEST_DELAY = 4.1  # 4.1 seconds ensures we strictly hit no more than ~14.6 requests per minute
+# Reduced to 25 to ensure the AI doesn't hit the 8,192 output token limit
+BATCH_SIZE = 25 
+REQUEST_DELAY = 4.1  
 
 # ==========================================
 # 2. STRICT DATABASE SETUP & CLEANING
@@ -30,7 +31,7 @@ def enforce_strict_database_mode():
         conn.execute("PRAGMA synchronous = FULL")       
         conn.commit()
         conn.close()
-        print("[✓] Hidden files disabled. Database is in direct-write mode.", flush=True)
+        print("[✓] Hidden files disabled.", flush=True)
     except Exception as e:
         print(f"[!] Error enforcing strict mode: {e}")
 
@@ -50,11 +51,8 @@ def remove_duplicates():
         deleted_count = cursor.rowcount
         conn.commit()
         conn.close()
-        
         if deleted_count > 0:
-            print(f"🧹 SUCCESS: Found and deleted {deleted_count} duplicate items!")
-        else:
-            print("🧹 Database is perfectly clean. No duplicates found.")
+            print(f"🧹 SUCCESS: Deleted {deleted_count} duplicate items!")
     except Exception as e:
         print(f"[!] Error during deduplication: {e}")
 
@@ -91,7 +89,6 @@ def fetch_pending_ingredients():
 
 def save_enriched_results(results_tuples):
     if not results_tuples: return
-    print(f"[!] DIRECT WRITE: Saving batch of {len(results_tuples)} items to DB...")
     conn = sqlite3.connect(DB_FILE, timeout=15.0)
     conn.execute("PRAGMA journal_mode = DELETE;")
     conn.execute("PRAGMA synchronous = FULL;")
@@ -105,7 +102,6 @@ def save_enriched_results(results_tuples):
             WHERE id = ?
         ''', results_tuples)
         conn.commit()
-        print("✅ Batch saved perfectly!")
     except Exception as e:
         print(f"❌ Error saving batch: {e}")
     finally:
@@ -204,7 +200,9 @@ async def enrich_data_async():
             
             print(f"☁️ Processing Batch {index + 1}/{len(batches)} ({len(batch)} items)...")
             
-            for attempt in range(3):
+            success = False
+            # Circuit Breaker & Exponential Backoff Loop
+            for attempt in range(5):
                 try:
                     async with session.post(GEMINI_URL, headers=headers, json=payload, timeout=120) as response:
                         if response.status == 200:
@@ -214,16 +212,27 @@ async def enrich_data_async():
                             
                             mapped_data = sanitize_and_map_results(ai_results, batch)
                             save_enriched_results(mapped_data)
+                            print("✅ Batch saved perfectly!")
+                            success = True
                             break
                         elif response.status == 429:
-                            print("   [!] Rate limit hit. Backing off for 15 seconds...")
-                            await asyncio.sleep(15) 
+                            # Calculate exponential backoff with jitter
+                            base_delay = 2 ** attempt
+                            jitter = random.uniform(0, 0.1) * base_delay
+                            delay = base_delay + jitter
+                            print(f"   [!] Rate limit hit (429). Retrying in {delay:.2f} seconds...")
+                            await asyncio.sleep(delay)
                         else:
                             print(f"   [!] API Error {response.status}: {await response.text()}")
                             await asyncio.sleep(2)
                 except Exception as e:
                     print(f"   [!] Request failed on attempt {attempt + 1}: {e}")
                     await asyncio.sleep(2)
+            
+            if not success:
+                print("\n[!] FATAL: Failed 5 times in a row. The daily API limit is likely exhausted.")
+                print("[!] Halting script to prevent endless looping and API bans.")
+                sys.exit(1)
             
             elapsed = time.time() - start_time
             if elapsed < REQUEST_DELAY:
