@@ -1,28 +1,38 @@
-name: Database Enrichment
-on: [workflow_dispatch] # Adds a "Run workflow" button in the GitHub Actions tab
+name: Daily Database Enrichment
+
+on:
+  schedule:
+    # Runs automatically every day at 08:30 UTC (right after Gemini daily limits reset)
+    - cron: '30 8 * * *'
+  workflow_dispatch: # Keeps the manual "Run workflow" button active
 
 jobs:
   enrich-db:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Allows GitHub Actions to commit updated DB back to repository
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          
+
       - name: Install dependencies
-        run: pip install -r requirements.txt
-        
+        run: pip install aiohttp
+
       - name: Run Enrichment Script
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python enricher.py
-          
-      - name: Save Updated Database
-        uses: actions/upload-artifact@v4
-        with:
-          name: enriched-database
-          path: MasterUnifiedDB.db
+        continue-on-error: true # Prevents workflow failure status when circuit breaker halts execution
+
+      - name: Commit & Push Processed Progress
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add MasterUnifiedDB.db
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: save daily enriched database entries" && git push)
