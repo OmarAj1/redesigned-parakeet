@@ -216,12 +216,10 @@ async def enrich_data_async():
                             success = True
                             break
                         elif response.status == 429:
-                            # Calculate exponential backoff with jitter
-                            base_delay = 2 ** attempt
-                            jitter = random.uniform(0, 0.1) * base_delay
-                            delay = base_delay + jitter
-                            print(f"   [!] Rate limit hit (429). Retrying in {delay:.2f} seconds...")
-                            await asyncio.sleep(delay)
+                            error_text = await response.text()
+                            print(f"   [!] EXACT GOOGLE ERROR: {error_text}")
+                            print("   [!] Rate limit hit. Backing off...")
+                            await asyncio.sleep(15)
                         else:
                             print(f"   [!] API Error {response.status}: {await response.text()}")
                             await asyncio.sleep(2)
